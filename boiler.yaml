@@ -1,0 +1,876 @@
+substitutions:
+  device_name: "boiler"
+  friendly_name: "Умный водонагреватель"
+ 
+ # Оптимальные пины для ESP8266 D1 Mini
+  pin_button: D5       # GPIO14 - кнопка режимов(с подтяжкой к GND)
+  pin_button_schedule: D6  # GPIO12 - кнопка для расписания (с подтяжкой к GND)
+  pin_led: D4          # GPIO2 - встроенный LED (инвертирован)
+  pin_ds18b20: D0      # GPIO16 - отдельный пин для DS18B20 (без конфликтов)
+  pin_heater_low: D7   # GPIO13 - реле малой мощности
+  pin_heater_high: D8  # GPIO15 - реле большой мощности
+  # Настройки I2C для LCD 1602
+  i2c_sda: D1          # GPIO5 - SDA для LCD
+  i2c_scl: D2          # GPIO4 - SCL для LCD
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    then:
+      - lambda: |-
+          std::string mode_name;
+          int mode = id(heater_mode_globals);
+          if (mode == 0) mode_name = "OFF";
+          else if (mode == 1) mode_name = "ECO";
+          else if (mode == 2) mode_name = "MEDIUM";
+          else mode_name = "FAST";
+          
+          id(mode_select).publish_state(mode_name);
+          ESP_LOGD("boot", "Initialized mode to: %s", mode_name.c_str());
+
+esp8266:
+  board: d1_mini
+  restore_from_flash: true
+
+logger:
+
+api:
+  encryption:
+    key: "O5lPMX+ZZaqdLOwIUOpjNZa5myIDV55KDLP1FVbH5mU="
+  reboot_timeout: 15min
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  min_auth_mode: WPA2
+  reboot_timeout: 15min
+  
+  ap:
+    ssid: "${friendly_name} Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+
+mqtt:
+  broker: !secret mqtt_broker_remote
+  port: 1883
+  username: !secret mqtt_user
+  password: !secret mqtt_password    
+  birth_message:
+    topic: ${device_name}/status
+    payload: "В работе"
+  will_message:
+    topic: ${device_name}/status
+    payload: "Отключен"
+  
+  on_message:
+    - topic: ${device_name}/number/target_temperature_on/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(temp_on_globals))) {
+              id(temp_on_globals) = new_value;
+              id(temp_on_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/number/target_temperature_off/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(temp_off_globals))) {
+              id(temp_off_globals) = new_value;
+              id(temp_off_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/number/schedule_start_hour/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(on_hour_globals))) {
+              id(on_hour_globals) = new_value;
+              id(schedule_start_hour_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/number/schedule_start_minute/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(on_minutes_globals))) {
+              id(on_minutes_globals) = new_value;
+              id(schedule_start_minute_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/number/schedule_end_hour/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(off_hour_globals))) {
+              id(off_hour_globals) = new_value;
+              id(schedule_end_hour_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/number/schedule_end_minute/state
+      then:
+        - lambda: |-
+            float new_value = std::stof(x.c_str());
+            if (std::abs(new_value != id(off_minutes_globals))) {
+              id(off_minutes_globals) = new_value;
+              id(schedule_end_minute_number).publish_state(new_value);
+            }
+
+    - topic: ${device_name}/switch/schedule_enabled/state
+      then:
+        - lambda: |-
+            bool new_value = false;
+            if (x == "ON" || x == "true" || x == "1") {
+              new_value = true;
+            }
+            if (new_value != id(schedule_enabled_globals)) {
+              id(schedule_enabled_globals) = new_value;
+              if (new_value) {
+                id(schedule_enabled_switch).turn_on();
+              } else {
+                id(schedule_enabled_switch).turn_off();
+              }
+            }
+
+    - topic: ${device_name}/select/heating_mode/state
+      then:
+        - lambda: |-
+            std::string new_mode = x;
+            
+            int mode = 0;
+            if (new_mode == "ECO") mode = 1;
+            else if (new_mode == "MEDIUM") mode = 2;
+            else if (new_mode == "FAST") mode = 3;
+            else mode = 0;
+            
+            if (id(heater_mode_globals) != mode) {
+              id(heater_mode_globals) = mode;
+              
+              std::string mode_name;
+              if (mode == 0) mode_name = "OFF";
+              else if (mode == 1) mode_name = "ECO";
+              else if (mode == 2) mode_name = "MEDIUM";
+              else mode_name = "FAST";
+              
+              id(mode_select).publish_state(mode_name);
+              
+              ESP_LOGD("mqtt", "Heating mode changed via MQTT to: %s", mode_name.c_str());
+              id(control_heaters).execute();
+            }
+            
+i2c:
+  sda: ${i2c_sda}
+  scl: ${i2c_scl}
+  scan: false
+  id: bus_a
+  frequency: 50kHz
+
+one_wire:
+  - platform: gpio
+    pin: ${pin_ds18b20}
+    id: dallas_bus
+
+status_led:
+  pin:
+    number: ${pin_led}
+    inverted: true
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: ${pin_button}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Mode Select Button"
+    id: mode_button
+    internal: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            int current_mode = id(heater_mode_globals);
+            current_mode++;
+            if (current_mode > 3) current_mode = 0;
+            id(heater_mode_globals) = current_mode;
+            
+            std::string mode_name;
+            if (current_mode == 0) mode_name = "OFF";
+            else if (current_mode == 1) mode_name = "ECO";
+            else if (current_mode == 2) mode_name = "MEDIUM";
+            else mode_name = "FAST";
+            
+            id(mode_select).publish_state(mode_name);
+            
+            ESP_LOGD("button", "Mode changed to: %s", mode_name.c_str());
+        - script.execute: control_heaters
+
+  - platform: gpio
+    pin:
+      number: ${pin_button_schedule}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Schedule Toggle Button"
+    id: schedule_button
+    internal: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            bool current_state = id(schedule_enabled_globals);
+            if (!current_state) {
+              id(schedule_enabled_globals) = true;
+              id(schedule_enabled_switch).turn_on();
+              ESP_LOGD("button", "Schedule enabled");
+            } else {
+              id(schedule_enabled_globals) = false;
+              id(schedule_enabled_switch).turn_off();
+              ESP_LOGD("button", "Schedule disabled");
+            }
+        - script.execute: control_heaters
+
+button:
+  - platform: restart
+    name: "Boiler Restart"
+
+sensor:
+  - platform: dallas_temp
+    name: "Water Temperature"
+    id: water_temp
+    one_wire_id: dallas_bus
+    accuracy_decimals: 1
+    update_interval: 10s
+    filters:
+      - filter_out: nan
+      - median:
+          window_size: 3
+          send_every: 3
+          send_first_at: 3
+    on_value:
+      then:
+        - script.execute: control_heaters
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 30s
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+
+globals:
+  - id: temp_on_globals
+    type: float
+    restore_value: yes
+    initial_value: "25.0"
+
+  - id: temp_off_globals
+    type: float
+    restore_value: yes
+    initial_value: "60.0"
+
+  - id: heater_mode_globals
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: heater_low_globals
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: heater_higt_globals
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: heating_globals
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: on_hour_globals
+    type: int
+    restore_value: yes
+    initial_value: "6"
+
+  - id: on_minutes_globals
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: off_hour_globals
+    type: int
+    restore_value: yes
+    initial_value: "23"
+
+  - id: off_minutes_globals
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: schedule_enabled_globals
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+
+output:
+  - platform: gpio
+    pin:
+      number: ${pin_heater_low}
+      mode: OUTPUT
+    id: heater_low_relay
+    inverted: false
+
+  - platform: gpio
+    pin:
+      number: ${pin_heater_high}
+      mode: OUTPUT
+    id: heater_high_relay
+    inverted: false
+
+display:
+  - platform: lcd_pcf8574
+    dimensions: 16x2
+    address: 0x27
+    id: lcd_display
+    update_interval: 500ms
+    lambda: |-
+      char line1[17];
+      char line2[17];
+      
+      float current_temp = id(water_temp).has_state() ? id(water_temp).state : 0.0;
+      float target_temp_off = id(temp_off_globals);      // температура выключения
+      float target_temp_on = id(temp_on_globals);        // температура включения
+      int mode = id(heater_mode_globals);
+      
+      // Форматируем температуры
+      char temp_on_str[5];
+      char temp_off_str[5];
+      char current_str[6];
+      
+      sprintf(temp_on_str, "%2.0f", target_temp_on);
+      sprintf(temp_off_str, "%2.0f", target_temp_off);
+      sprintf(current_str, "%4.1f", current_temp);
+      
+      int on_len = strlen(temp_on_str);
+      int off_len = strlen(temp_off_str);
+      int current_len = strlen(current_str);
+      
+      // Вычисляем позиции
+      int current_start = (16 - current_len) / 2;  // позиция начала текущей температуры
+      int current_end = current_start + current_len;
+      int off_start = 16 - off_len;                 // позиция начала температуры выключения
+      
+      // Строим строку: [ON] [current] [OFF]
+      strcpy(line1, temp_on_str);
+      
+      for (int i = on_len; i < current_start; i++) {
+        line1[i] = ' ';
+      }
+      strcpy(line1 + current_start, current_str);
+      
+      for (int i = current_end; i < off_start; i++) {
+        line1[i] = ' ';
+      }
+      strcpy(line1 + off_start, temp_off_str);
+      line1[16] = '\0';
+      
+      // Анимация стрелки ТОЛЬКО между текущей и целевой температурой
+      static uint32_t last_update = 0;
+      static int arrow_offset = 0;
+      static bool direction_forward = true;
+      
+      uint32_t now = millis();
+      if (now - last_update >= 150) {
+        last_update = now;
+        
+        if (mode > 0) {
+          bool heaters_on = id(heater_low_globals) || id(heater_higt_globals);
+          
+          // Определяем зону анимации (между текущей температурой и целевой)
+          int anim_start, anim_end;
+          
+          if (heaters_on) {
+            // Нагрев: стрелка бежит от текущей температуры к температуре выключения
+            anim_start = current_end;
+            anim_end = off_start - 1;  //  -1, чтобы стрелка доходила до температуры выключения
+            if (anim_start < anim_end) {
+              arrow_offset++;
+              if (arrow_offset > (anim_end - anim_start)) {
+                arrow_offset = 0;
+              }
+            }
+          } else {
+            // Остывание: стрелка бежит от текущей температуры к температуре включения
+            anim_start = on_len;
+            anim_end = current_start - 1;
+            if (anim_start < anim_end) {
+              arrow_offset++;
+              if (arrow_offset > (anim_end - anim_start)) {
+                arrow_offset = 0;
+              }
+            }
+          }
+        }
+      }
+      
+      // Рисуем анимацию
+      if (mode == 0) {
+        // Режим OFF - закрашиваем все пробелы X
+        for (int i = 0; i < 16; i++) {
+          if (line1[i] == ' ') line1[i] = '-';
+        }
+      } else {
+        bool heaters_on = id(heater_low_globals) || id(heater_higt_globals);
+        
+        // Очищаем старые стрелки
+        for (int i = 0; i < 16; i++) {
+          if (line1[i] == '\x7E' || line1[i] == '\x7F') {
+            line1[i] = ' ';
+          }
+        }
+        
+        if (heaters_on) {
+          // Нагрев: стрелка бежит вправо от текущей температуры к температуре выключения
+          int anim_start = current_end;
+          int anim_end = off_start;
+          
+          if (anim_start < anim_end) {
+            int arrow_pos = anim_start + arrow_offset;
+            if (arrow_pos >= anim_start && arrow_pos < anim_end && line1[arrow_pos] == ' ') {
+              line1[arrow_pos] = '\x7E';  // Стрелка вправо
+            }
+          }
+        } else {
+          // Остывание: стрелка бежит влево от текущей температуры к температуре включения
+          int anim_start = on_len;
+          int anim_end = current_start;
+          
+          if (anim_start < anim_end) {
+            int arrow_pos = anim_end - arrow_offset - 1;
+            if (arrow_pos >= anim_start && arrow_pos < anim_end && line1[arrow_pos] == ' ') {
+              line1[arrow_pos] = '\x7F';  // Стрелка влево
+            }
+          }
+        }
+      }
+      
+      line1[16] = '\0';
+      
+      // Вторая строка (без изменений)
+      const char* mode_names[] = {"OFF", "ECO", "MED", "FAST"};
+      
+      bool schedule_is_enabled = id(schedule_enabled_globals);
+      
+      if (schedule_is_enabled) {
+        int on_hour = id(on_hour_globals);
+        int on_min = id(on_minutes_globals);
+        int off_hour = id(off_hour_globals);
+        int off_min = id(off_minutes_globals);
+        
+        char schedule_str[9];
+        sprintf(schedule_str, "%02d:%02d-%02d:%02d", on_hour, on_min, off_hour, off_min);
+        
+        strcpy(line2, schedule_str);
+        
+        int sched_len = strlen(schedule_str);
+        int mode_len = 4;
+        
+        int mode_start_pos = 16 - mode_len;
+        for (int i = sched_len; i < mode_start_pos; i++) {
+          line2[i] = ' ';
+        }
+        
+        sprintf(line2 + mode_start_pos, "%-4s", mode_names[mode]);
+        line2[16] = '\0';
+      } else {
+        int hour = 0;
+        int minute = 0;
+        if (id(sntp_time).now().is_valid()) {
+          hour = id(sntp_time).now().hour;
+          minute = id(sntp_time).now().minute;
+        }
+        
+        char time_str[6];
+        sprintf(time_str, "%02d:%02d", hour, minute);
+        
+        strcpy(line2, time_str);
+        
+        int time_len = strlen(time_str);
+        int mode_len = 4;
+        
+        int mode_start_pos = 16 - mode_len;
+        for (int i = time_len; i < mode_start_pos; i++) {
+          line2[i] = ' ';
+        }
+        
+        sprintf(line2 + mode_start_pos, "%-4s", mode_names[mode]);
+        line2[16] = '\0';
+      }
+
+      it.print(0, 0, line1);
+      it.print(0, 1, line2);
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "VLAT-10"
+    on_time:
+      - seconds: 0
+        minutes: 0  
+        hours: /1
+        then:
+          - script.execute: check_time_schedule
+
+  - platform: homeassistant
+    id: homeassistant_time
+
+script:
+  - id: control_heaters
+    mode: single
+    then:
+      - lambda: |-
+          if (!id(water_temp).has_state()) return;
+          
+          float current = id(water_temp).state;
+          float target_on = id(temp_on_globals);
+          float target_off = id(temp_off_globals);
+          int mode = id(heater_mode_globals);
+          
+          bool should_heat = false;
+          bool low_heater = false;
+          bool high_heater = false;
+          
+          bool schedule_allows = true;
+          if (id(schedule_enabled_globals) && id(sntp_time).now().is_valid()) {
+            int current_hour = id(sntp_time).now().hour;
+            int current_minute = id(sntp_time).now().minute;
+            int current_time_minutes = current_hour * 60 + current_minute;
+            
+            int on_time_minutes = id(on_hour_globals) * 60 + id(on_minutes_globals);
+            int off_time_minutes = id(off_hour_globals) * 60 + id(off_minutes_globals);
+            
+            schedule_allows = (current_time_minutes >= on_time_minutes && 
+                              current_time_minutes < off_time_minutes);
+            
+            if (!schedule_allows) {
+              ESP_LOGD("schedule", "Heating blocked by schedule");
+            }
+          }
+          
+          if (mode > 0 && schedule_allows && current <= target_on) {
+            should_heat = true;
+          } else if (mode > 0 && schedule_allows && current >= target_off) {
+            should_heat = false;
+          } else if (mode > 0 && schedule_allows) {
+            should_heat = id(heating_globals);
+          }
+          
+          if (should_heat) {
+            switch(mode) {
+              case 1:  // ECO
+                low_heater = true;
+                high_heater = false;
+                break;
+              case 2:  // MEDIUM
+                low_heater = false;
+                high_heater = true;
+                break;
+              case 3:  // FAST
+                low_heater = true;
+                high_heater = true;
+                break;
+              default:
+                low_heater = false;
+                high_heater = false;
+            }
+          }
+          
+          if (id(heater_low_globals) != low_heater) {
+            id(heater_low_relay).set_state(low_heater);
+            id(heater_low_globals) = low_heater;
+          }
+          
+          if (id(heater_higt_globals) != high_heater) {
+            id(heater_high_relay).set_state(high_heater);
+            id(heater_higt_globals) = high_heater;
+          }
+          
+          if (id(heating_globals) != should_heat) {
+            id(heating_globals) = should_heat;
+          }
+          
+          static std::string last_status;
+          std::string status;
+          if (!schedule_allows && mode > 0) {
+            status = "SCHEDULE ON";
+          } else if (low_heater && high_heater) status = "FAST HEATING";
+          else if (low_heater) status = "ECO HEATING";
+          else if (high_heater) status = "MEDIUM HEATING";
+          else if (mode > 0) status = "IDLE";
+          else status = "OFF";
+          
+          if (last_status != status) {
+            last_status = status;
+            id(heater_status_text).publish_state(status);
+          }
+  
+  - id: check_time_schedule
+    mode: single
+    then:
+      - lambda: |-
+          if (!id(schedule_enabled_globals)) return;
+          
+          if (!id(sntp_time).now().is_valid()) return;
+          
+          int current_hour = id(sntp_time).now().hour;
+          int current_minute = id(sntp_time).now().minute;
+          int current_time_minutes = current_hour * 60 + current_minute;
+          
+          int on_time_minutes = id(on_hour_globals) * 60 + id(on_minutes_globals);
+          int off_time_minutes = id(off_hour_globals) * 60 + id(off_minutes_globals);
+          
+          bool in_allowed_time = (current_time_minutes >= on_time_minutes && 
+                                   current_time_minutes < off_time_minutes);
+          
+          if (!in_allowed_time && id(heater_mode_globals) > 0) {
+            ESP_LOGD("schedule", "Outside allowed time but mode is %d (not forced, heating disabled by control logic)", id(heater_mode_globals));
+            id(control_heaters).execute();
+          } else if (in_allowed_time && id(heater_mode_globals) > 0) {
+            ESP_LOGD("schedule", "Inside allowed time, normal operation");
+            id(control_heaters).execute();
+          }
+
+number:
+  - platform: template
+    name: "Target Temperature ON"
+    id: temp_on_number
+    entity_category: config
+    optimistic: true
+    min_value: 10
+    max_value: 75
+    step: 1
+    initial_value: 25
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: temp_on_globals
+          value: !lambda |-
+            float new_temp = x;
+            if (new_temp != id(temp_on_globals)) {
+              return new_temp;
+            }
+            return id(temp_on_globals);
+      - lambda: |-
+          float new_temp = id(temp_on_globals);
+          id(temp_on_number).publish_state(new_temp);
+          ESP_LOGD("number", "Target ON set to: %.1f", new_temp);
+      - script.execute: control_heaters
+  
+  - platform: template
+    name: "Target Temperature OFF"
+    id: temp_off_number
+    entity_category: config
+    optimistic: true
+    min_value: 10
+    max_value: 80
+    step: 1
+    initial_value: 60
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: temp_off_globals
+          value: !lambda |-
+            float new_temp = x;
+            if (new_temp != id(temp_off_globals)) {
+              return new_temp;
+            }
+            return id(temp_off_globals);
+      - lambda: |-
+          float new_temp = id(temp_off_globals);
+          id(temp_off_number).publish_state(new_temp);
+          ESP_LOGD("number", "Target OFF set to: %.1f", new_temp);
+      - script.execute: control_heaters
+
+  - platform: template
+    name: "Schedule Start Hour"
+    id: schedule_start_hour_number
+    entity_category: config
+    optimistic: true
+    mode: box
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 6
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: on_hour_globals
+          value: !lambda |-
+            int new_hour = x;
+            if (new_hour != id(on_hour_globals)) {
+              return new_hour;
+            } 
+            return id(on_hour_globals);
+      - lambda: |-
+          id(schedule_start_hour_number).publish_state(id(on_hour_globals));
+          ESP_LOGD("schedule", "Start hour set to: %d", id(on_hour_globals));
+      - script.execute: control_heaters
+  
+  - platform: template
+    name: "Schedule Start Minute"
+    id: schedule_start_minute_number
+    entity_category: config
+    optimistic: true
+    mode: box
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: on_minutes_globals
+          value: !lambda |-
+            int new_minutes = x;
+            if (new_minutes != id(on_minutes_globals)) {
+              return new_minutes;
+            } 
+            return id(on_minutes_globals);
+      - lambda: |-
+          id(schedule_start_minute_number).publish_state(id(on_minutes_globals));
+          ESP_LOGD("schedule", "Start minute set to: %d", id(on_minutes_globals));
+      - script.execute: control_heaters
+  
+  - platform: template
+    name: "Schedule End Hour"
+    id: schedule_end_hour_number
+    entity_category: config
+    optimistic: true
+    mode: box
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 23
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: off_hour_globals
+          value: !lambda |-
+            int new_hour = x;
+            if (new_hour != id(off_hour_globals)) {
+              return new_hour;
+            } 
+            return id(off_hour_globals);
+      - lambda: |-
+          id(schedule_end_hour_number).publish_state(id(off_hour_globals));
+          ESP_LOGD("schedule", "End hour set to: %d", id(off_hour_globals));
+      - script.execute: control_heaters
+  
+  - platform: template
+    name: "Schedule End Minute"
+    id: schedule_end_minute_number
+    entity_category: config
+    optimistic: true
+    mode: box
+    min_value: 0
+    max_value: 59
+    step: 1
+    initial_value: 0
+    restore_value: true
+    set_action:
+      - globals.set:
+          id: off_minutes_globals
+          value: !lambda |-
+            int new_minutes = x;
+            if (new_minutes != id(off_minutes_globals)) {
+              return new_minutes;
+            } 
+            return id(off_minutes_globals);
+      - lambda: |-
+          id(schedule_end_minute_number).publish_state(id(off_minutes_globals));
+          ESP_LOGD("schedule", "End minute set to: %d", id(off_minutes_globals));
+      - script.execute: control_heaters
+      
+select:
+  - platform: template
+    name: "Heating Mode"
+    id: mode_select
+    optimistic: true
+    options:
+      - "OFF"
+      - "ECO"
+      - "MEDIUM"
+      - "FAST"
+    initial_option: "OFF"
+    set_action:
+      - lambda: |-
+          std::string selected = x;
+          int mode = 0;
+          if (selected == "ECO") mode = 1;
+          else if (selected == "MEDIUM") mode = 2;
+          else if (selected == "FAST") mode = 3;
+          
+          if (id(heater_mode_globals) != mode) {
+            id(heater_mode_globals) = mode;
+            ESP_LOGD("mode", "Mode changed to: %s", selected.c_str());
+            id(control_heaters).execute();
+          }
+
+switch:
+  - platform: template
+    name: "Schedule Enabled"
+    id: schedule_enabled_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    lambda: return id(schedule_enabled_globals);
+    turn_on_action:
+      - globals.set:
+          id: schedule_enabled_globals
+          value: "true"
+      - lambda: 
+          ESP_LOGD("schedule", "Schedule enabled");
+      - script.execute: control_heaters
+    turn_off_action:
+      - globals.set:
+          id: schedule_enabled_globals
+          value: "false"
+      - lambda: 
+          ESP_LOGD("schedule", "Schedule disabled");
+      - script.execute: control_heaters
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      id: ip_address
+    ssid:
+      name: "WiFi SSID"
+
+  - platform: template
+    name: "Heater Status"
+    id: heater_status_text
+    lambda: return id(heater_status_text).state;
+    update_interval: 1s
+    
